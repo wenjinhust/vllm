@@ -44,6 +44,7 @@ from vllm.utils.gc_utils import (
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -1343,12 +1344,15 @@ class EngineCoreProc(EngineCore):
                     "[shutdown] EngineCore: trigger received signal=%s",
                     signal_name,
                 )
+                if signum == signal.SIGTERM:
+                    get_watch_dog().dump_stack(signal_name)
                 engine_core.shutdown_state = EngineShutdownState.REQUESTED
                 signal_callback.trigger()
 
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
 
+            start_watch_dog(f"engine_{dp_rank}", vllm_config.watchdog_config, logger)
             engine_core.run_busy_loop()
 
         except SystemExit as e:
@@ -1442,7 +1446,8 @@ class EngineCoreProc(EngineCore):
                     waited = True
             block = self.process_input_queue_block
             try:
-                req = self.input_queue.get(block=block)
+                with get_watch_dog().disable():
+                    req = self.input_queue.get(block=block)
                 self._handle_client_request(*req)
             except queue.Empty:
                 break
@@ -1459,6 +1464,7 @@ class EngineCoreProc(EngineCore):
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
+        get_watch_dog().feed()
 
         # Step the engine core.
         outputs, model_executed = self.step_fn()
