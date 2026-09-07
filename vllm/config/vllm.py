@@ -50,6 +50,7 @@ from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
+from .watchdog_config import WatchdogConfig
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
@@ -413,6 +414,9 @@ class VllmConfig:
 
     weight_transfer_config: WeightTransferConfig | None = None
     """The configurations for weight transfer during RL training."""
+
+    watchdog_config: WatchdogConfig = Field(default_factory=WatchdogConfig)
+    """Configuration for the stack-dump watchdog."""
 
     shutdown_timeout: int = Field(default=0, ge=0)
     """Shutdown grace period for in-flight requests. Shutdown will be delayed for
