@@ -998,6 +998,9 @@ class WorkerProc:
                 logger.exception("Error getting async model runner output")
                 output = e
 
+        if isinstance(output, ModelRunnerOutput):
+            output.watchdog_stats = self._watchdog.take_timeout_stats()
+
         if isinstance(output, Exception):
             result = (WorkerProc.ResponseStatus.FAILURE, str(output))
         else:

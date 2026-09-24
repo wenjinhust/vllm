@@ -4,6 +4,7 @@ import faulthandler
 import os
 import threading
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from vllm.utils.safe_fs import get_user_root_dir, prepare_private_dir, safe_open_file
@@ -14,6 +15,16 @@ if TYPE_CHECKING:
 _DEFAULT_NAME = "vllm"
 _DEFAULT_TIMEOUT = 300
 _DEFAULT_INTERVAL = 10
+
+
+@dataclass
+class WatchdogStat:
+    """Statistics snapshot of the watchdog for one reporting window."""
+
+    name: str
+    num_timeouts: int
+    num_recoveries: int
+    timeout_duration: float
 
 
 class WatchDog:
@@ -30,6 +41,14 @@ class WatchDog:
         # Last timeout log time, initialized to 0 to ensure the first
         # timeout is always logged
         self._last_timeout_log = 0.0
+
+        # Timeout statistics.
+        self._num_timeouts = 0
+        self._num_recoveries = 0
+        self._timeout_duration = 0.0
+        # The moment the current (unrecovered) timeout started, or None when
+        # the watchdog is not in a timeout state.
+        self._timeout_start_time: float | None = None
 
         self._stop_event = threading.Event()
         self._thread = None
@@ -69,8 +88,16 @@ class WatchDog:
 
     def feed(self):
         """Feed interface, external callers use this to update last feed time"""
+        now = time.monotonic()
+        if self._timeout_start_time is not None:
+            # The process hung and is now responsive again: record the
+            # recovery and the duration of the timeout. Keep only the most
+            # recent single timeout's duration, not a running sum.
+            self._num_recoveries += 1
+            self._timeout_duration = now - self._timeout_start_time
+            self._timeout_start_time = None
         # Single float assignment is atomic in CPython
-        self._last_feed_time = time.monotonic()
+        self._last_feed_time = now
 
     def dump_stack(self, reason):
         """Dump all thread stack traces to the dump file for the given reason."""
@@ -118,6 +145,10 @@ class WatchDog:
                 # the timeout hasn't been logged since the last feed; update
                 # the log timestamp to avoid duplicate logs.
                 self._last_timeout_log = now
+                # The timeout started once the last feed went stale; recovery
+                # duration is settled in feed().
+                self._timeout_start_time = self._last_feed_time
+                self._num_timeouts += 1
                 self.dump_stack("feed timeout")
             # If not timed out, do nothing and keep _last_timeout_log unchanged
 
@@ -142,6 +173,43 @@ class WatchDog:
                 # exited; keeping it otherwise prevents a later start()
                 # from creating a duplicate live monitor thread.
                 self._thread = None
+
+    @property
+    def num_timeouts(self) -> int:
+        """Total number of feed timeouts observed."""
+        return self._num_timeouts
+
+    @property
+    def num_recoveries(self) -> int:
+        """Total number of times the process recovered from a timeout."""
+        return self._num_recoveries
+
+    @property
+    def timeout_duration(self) -> float:
+        """Wall-clock seconds of the most recent single timeout."""
+        return self._timeout_duration
+
+    def take_timeout_stats(self) -> WatchdogStat:
+        """Return the accumulated timeout statistics and reset them.
+
+        Intended for periodic reporting (e.g. attached to per-step outputs)
+        so that each consumer observes only the stats since the last read.
+
+        Returns:
+            A ``WatchdogStat`` carrying the watchdog name plus
+            (num_timeouts, num_recoveries, timeout_duration).
+
+        """
+        stats = WatchdogStat(
+            name=self._name,
+            num_timeouts=self._num_timeouts,
+            num_recoveries=self._num_recoveries,
+            timeout_duration=self._timeout_duration,
+        )
+        self._num_timeouts = 0
+        self._num_recoveries = 0
+        self._timeout_duration = 0.0
+        return stats
 
 
 _watch_dog = WatchDog()

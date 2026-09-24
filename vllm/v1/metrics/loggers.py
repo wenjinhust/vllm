@@ -503,6 +503,42 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         #
+        # Watchdog statistics
+        #
+        watchdog_labelnames = labelnames + ["watchdog"]
+
+        counter_watchdog_timeouts = self._counter_cls(
+            name="vllm:watchdog_timeouts",
+            documentation=(
+                "Feed-timeout events detected by the watchdog in the engine "
+                "core process or its worker processes."
+            ),
+            labelnames=watchdog_labelnames,
+        )
+        self.counter_watchdog_timeouts = counter_watchdog_timeouts
+
+        counter_watchdog_recoveries = self._counter_cls(
+            name="vllm:watchdog_recoveries",
+            documentation=(
+                "Recoveries from feed-timeout events, i.e. the watchdog was "
+                "fed again after a timeout."
+            ),
+            labelnames=watchdog_labelnames,
+        )
+        self.counter_watchdog_recoveries = counter_watchdog_recoveries
+
+        gauge_watchdog_timeout_duration = self._gauge_cls(
+            name="vllm:watchdog_timeout_duration_seconds",
+            documentation=(
+                "Wall-clock seconds of the most recent watchdog feed-timeout "
+                "before recovery."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=watchdog_labelnames,
+        )
+        self.gauge_watchdog_timeout_duration = gauge_watchdog_timeout_duration
+
+        #
         # Scheduler state
         #
         gauge_scheduler_running = self._gauge_cls(
@@ -1081,6 +1117,17 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
             if scheduler_stats.perf_stats is not None:
                 self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
+
+            for wstat in scheduler_stats.watchdog_stats:
+                labels = self.per_engine_labelvalues[engine_idx] + [wstat.name]
+                self.counter_watchdog_timeouts.labels(*labels).inc(wstat.num_timeouts)
+                self.counter_watchdog_recoveries.labels(*labels).inc(
+                    wstat.num_recoveries
+                )
+                if wstat.timeout_duration > 0:
+                    self.gauge_watchdog_timeout_duration.labels(*labels).set(
+                        wstat.timeout_duration
+                    )
 
             if (
                 self.kv_cache_metrics_enabled

@@ -23,6 +23,10 @@ def test_default_initialization():
     assert wd._dump_file == os.path.join(
         wd._dump_dir, f"VLLM_STACK_DUMP_for_vllm_{os.getpid()}.log"
     )
+    assert wd.num_timeouts == 0
+    assert wd.num_recoveries == 0
+    assert wd.timeout_duration == 0.0
+    assert wd._timeout_start_time is None
 
 
 def test_set_name_does_not_rebuild_dump_file():
@@ -279,6 +283,76 @@ class TestCheckLoop:
             wd._check_loop()
 
         mock_dump.assert_not_called()
+        assert wd.num_timeouts == 0
+        assert wd._timeout_start_time is None
+
+    def test_counts_timeout_once_and_recovery_on_feed(self):
+        """Verify the check loop counts a timeout only once per stale feed
+        epoch and feed() settles the recovery stats."""
+        wd = WatchDog()
+        wd._timeout = 0.01
+        wd._last_feed_time = time.monotonic() - 10  # already timed out
+
+        with (
+            patch.object(wd, "dump_stack") as mock_dump,
+            patch.object(
+                wd._stop_event,
+                "wait",
+                side_effect=self._fake_wait_that_exits_after({"n": 0}),
+            ),
+        ):
+            wd._check_loop()
+
+        assert wd.num_timeouts == 1
+        assert mock_dump.call_count == 1
+        assert wd._timeout_start_time is not None
+
+        wd.feed()  # the process recovers
+        assert wd.num_timeouts == 1
+        assert wd.num_recoveries == 1
+        assert wd.timeout_duration > 0.0
+        assert wd._timeout_start_time is None
+
+        # A subsequent feed in the normal state must not double-count.
+        wd.feed()
+        assert wd.num_recoveries == 1
+        assert wd.num_timeouts == 1
+
+    def test_take_timeout_stats_returns_and_resets(self):
+        """Verify take_timeout_stats() returns the accumulated statistics
+        (including the watchdog name) and resets the counters for the next
+        reporting window."""
+        wd = WatchDog()
+        wd._timeout = 0.01
+        wd._last_feed_time = time.monotonic() - 10  # already timed out
+
+        with (
+            patch.object(wd, "dump_stack"),
+            patch.object(
+                wd._stop_event,
+                "wait",
+                side_effect=self._fake_wait_that_exits_after({"n": 0}),
+            ),
+        ):
+            wd._check_loop()
+
+        stats = wd.take_timeout_stats()
+        assert stats.name == "vllm"
+        assert stats.num_timeouts == 1
+        assert stats.num_recoveries == 0
+        assert stats.timeout_duration == 0.0
+
+        wd.feed()  # settle the recovery duration
+        stats = wd.take_timeout_stats()
+        assert stats.name == "vllm"
+        assert stats.num_timeouts == 0
+        assert stats.num_recoveries == 1
+        assert stats.timeout_duration > 0.0
+
+        assert wd.num_timeouts == 0
+        assert wd.num_recoveries == 0
+        assert wd.timeout_duration == 0.0
+        assert wd._timeout_start_time is None
 
 
 def test_get_watch_dog_returns_shared_singleton():

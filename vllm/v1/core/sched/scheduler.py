@@ -31,6 +31,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.utils.math_utils import cdiv
+from vllm.utils.watch_dog import WatchdogStat, get_watch_dog
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -1929,6 +1930,7 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        worker_watchdog_stats = model_runner_output.watchdog_stats
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
@@ -2293,7 +2295,8 @@ class Scheduler(SchedulerInterface):
                 kv_connector_stats,
                 cudagraph_stats,
                 perf_stats,
-                ec_connector_stats=ec_connector_stats,
+                ec_connector_stats,
+                worker_watchdog_stats,
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -2795,6 +2798,7 @@ class Scheduler(SchedulerInterface):
         cudagraph_stats: CUDAGraphStat | None = None,
         perf_stats: PerfStats | None = None,
         ec_connector_stats: ECConnectorStats | None = None,
+        worker_watchdog_stats: WatchdogStat | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -2816,6 +2820,9 @@ class Scheduler(SchedulerInterface):
         ec_connector_stats_payload = (
             ec_connector_stats.data if ec_connector_stats else None
         )
+        watchdog_stats: list[WatchdogStat] = [get_watch_dog().take_timeout_stats()]
+        if worker_watchdog_stats:
+            watchdog_stats.append(worker_watchdog_stats)
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
@@ -2829,6 +2836,7 @@ class Scheduler(SchedulerInterface):
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
             ec_connector_stats=ec_connector_stats_payload,
+            watchdog_stats=watchdog_stats,
         )
 
     def make_spec_decoding_stats(
