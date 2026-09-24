@@ -115,7 +115,8 @@ class WatchDog:
                         "\n================================================================\n"
                     )
                 self._dump_seq += 1
-                dump_msg = f"[Watchdog]Dumped stack to {self._dump_file} due to {reason}"
+                dump_msg = (f"[Watchdog]Dumped stack to {self._dump_file} "
+                            f"due to {reason}")
                 if self._logger is not None:
                     self._logger.info(dump_msg)
                 else:

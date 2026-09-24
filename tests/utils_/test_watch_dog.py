@@ -157,9 +157,10 @@ def test_dump_stack_logs_failure_via_logger(tmp_path):
     with patch("vllm.utils.watch_dog.safe_open_file", side_effect=OSError("boom")):
         wd.dump_stack("timeout")
     logger.warning.assert_called_once()
-    message, _dump_file, error = logger.warning.call_args[0]
-    assert "Failed to dump stack trace" in message
-    assert "boom" in str(error)
+    message = logger.warning.call_args[0][0]
+    assert "[Watchdog]Failed to dump stack trace" in message
+    assert wd._dump_file in message
+    assert "boom" in message
     assert wd._dump_seq == 1  # not incremented on failure
 
 
@@ -412,9 +413,9 @@ def test_dump_stack_logs_success_via_logger(tmp_path):
     with patch("vllm.utils.watch_dog.safe_open_file", side_effect=open):
         wd.dump_stack("timeout")
     logger.info.assert_called_once()
-    message, dump_file, reason = logger.info.call_args[0]
-    assert "Call stack dumped" in message
-    assert dump_file == wd._dump_file
-    assert reason == "timeout"
+    message = logger.info.call_args[0][0]
+    assert "[Watchdog]Dumped stack to" in message
+    assert wd._dump_file in message
+    assert "timeout" in message
     assert os.path.exists(wd._dump_file)
     assert wd._dump_seq == 2  # incremented on success
