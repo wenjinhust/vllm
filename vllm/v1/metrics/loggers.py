@@ -1192,10 +1192,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.counter_watchdog_recoveries.labels(*labels).inc(
                     wstat.num_recoveries
                 )
-                if wstat.timeout_duration > 0:
-                    self.gauge_watchdog_timeout_duration.labels(*labels).set(
-                        wstat.timeout_duration
-                    )
+                # Always refresh so the gauge drops back to 0 once no new
+                # timeout is observed in the current window.
+                self.gauge_watchdog_timeout_duration.labels(*labels).set(
+                    wstat.timeout_duration
+                )
 
             if (
                 self.kv_cache_metrics_enabled

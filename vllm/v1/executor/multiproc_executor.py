@@ -697,9 +697,8 @@ class WorkerProc:
         self._init_message_queues(input_shm_handle, vllm_config)
 
         self._watchdog = start_watch_dog(
-            f"worker-{self.rank}", vllm_config.watchdog_config
+            f"worker_{self.rank}", vllm_config.watchdog_config, logger
         )
-        self._watchdog.set_logger(logger)
 
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)

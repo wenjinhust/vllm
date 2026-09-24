@@ -1121,9 +1121,8 @@ class EngineCoreProc(EngineCore):
             self.output_thread.start()
 
             self._watchdog = start_watch_dog(
-                f"engine_{self.engine_index}", vllm_config.watchdog_config
+                f"engine_{self.engine_index}", vllm_config.watchdog_config, logger
             )
-            self._watchdog.set_logger(logger)
 
             # Don't complete handshake until DP coordinator ready message is
             # received.

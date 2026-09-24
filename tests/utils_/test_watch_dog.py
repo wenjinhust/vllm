@@ -15,7 +15,7 @@ def test_default_initialization():
     assert wd._name == "vllm"
     assert wd._timeout == 300
     assert wd._check_interval == 10
-    assert wd._sequence == 1
+    assert wd._dump_seq == 1
     assert wd._thread is None
     assert wd._logger is None
     assert not wd._stop_event.is_set()
@@ -127,7 +127,7 @@ def test_dump_stack_writes_traceback_files(tmp_path):
     assert "Call stack dump #2" in content
     assert "due to heartbeat lost" in content
     assert "===" in content
-    assert wd._sequence == 3
+    assert wd._dump_seq == 3
 
 
 def test_start_prepares_private_dir_and_dump_safe_opens(tmp_path):
@@ -160,7 +160,7 @@ def test_dump_stack_logs_failure_via_logger(tmp_path):
     message, _dump_file, error = logger.warning.call_args[0]
     assert "Failed to dump stack trace" in message
     assert "boom" in str(error)
-    assert wd._sequence == 1  # not incremented on failure
+    assert wd._dump_seq == 1  # not incremented on failure
 
 
 def test_dump_stack_swallows_failure_without_logger(tmp_path):
@@ -169,7 +169,7 @@ def test_dump_stack_swallows_failure_without_logger(tmp_path):
         wd = WatchDog()
     with patch("vllm.utils.watch_dog.safe_open_file", side_effect=OSError("boom")):
         wd.dump_stack("timeout")  # must not raise
-    assert wd._sequence == 1  # not incremented on failure
+    assert wd._dump_seq == 1  # not incremented on failure
 
 
 def test_start_launches_daemon_thread():
@@ -417,4 +417,4 @@ def test_dump_stack_logs_success_via_logger(tmp_path):
     assert dump_file == wd._dump_file
     assert reason == "timeout"
     assert os.path.exists(wd._dump_file)
-    assert wd._sequence == 2  # incremented on success
+    assert wd._dump_seq == 2  # incremented on success

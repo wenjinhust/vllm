@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 from vllm.utils.safe_fs import get_user_root_dir, prepare_private_dir, safe_open_file
 
 if TYPE_CHECKING:
+    from logging import Logger
+
     from vllm.config import WatchdogConfig
 
 _DEFAULT_NAME = "vllm"
@@ -34,7 +36,7 @@ class WatchDog:
         self._name = _DEFAULT_NAME
         self._timeout = _DEFAULT_TIMEOUT
         self._check_interval = _DEFAULT_INTERVAL
-        self._sequence = 1
+        self._dump_seq = 1
 
         # Initialize feed time to current time to avoid immediate timeout on startup
         self._last_feed_time = time.monotonic()
@@ -105,27 +107,25 @@ class WatchDog:
             with self._dump_lock:
                 with safe_open_file(self._dump_file, "a") as f:
                     f.write(
-                        f"\nCall stack dump #{self._sequence} at "
+                        f"\nCall stack dump #{self._dump_seq} at "
                         f"{time.ctime()} due to {reason}\n\n"
                     )
                     faulthandler.dump_traceback(file=f, all_threads=True)
                     f.write(
                         "\n================================================================\n"
                     )
-                self._sequence += 1
+                self._dump_seq += 1
+                dump_msg = f"[Watchdog]Dumped stack to {self._dump_file} due to {reason}"
                 if self._logger is not None:
-                    self._logger.info(
-                        "Call stack dumped to %s due to %s",
-                        self._dump_file,
-                        reason,
-                    )
+                    self._logger.info(dump_msg)
+                else:
+                    print(dump_msg)
         except Exception as e:
+            err_msg = f"[Watchdog]Failed to dump stack trace to {self._dump_file}: {e}"
             if self._logger is not None:
-                self._logger.warning(
-                    "Failed to dump stack trace to %s: %s",
-                    self._dump_file,
-                    e,
-                )
+                self._logger.warning(err_msg)
+            else:
+                print(err_msg)
 
     def _check_loop(self):
         """Main loop of the background check thread"""
@@ -162,6 +162,11 @@ class WatchDog:
         self._thread = threading.Thread(target=self._check_loop, daemon=True)
         self.feed()
         self._thread.start()
+        start_msg = f"[Watchdog]Started thread for {self._name} (pid={os.getpid()})"
+        if self._logger is not None:
+            self._logger.info(start_msg)
+        else:
+            print(start_msg)
 
     def stop(self):
         """Stop the watchdog background thread"""
@@ -220,12 +225,26 @@ def get_watch_dog() -> WatchDog:
     return _watch_dog
 
 
-def start_watch_dog(name: str, watchdog_config: "WatchdogConfig") -> WatchDog:
+def start_watch_dog(
+    name: str,
+    watchdog_config: "WatchdogConfig",
+    logger: "Logger | None" = None,
+) -> WatchDog:
     """Start the process-wide WatchDog background thread if enabled.
 
     The watchdog is enabled only when ``watchdog_config.dump_dir`` is set;
     otherwise it stays dormant. Returns the WatchDog singleton either way.
     """
+    config_msg = (
+        "[Watchdog]Start with "
+        f"timeout={watchdog_config.timeout} "
+        f"check_interval={watchdog_config.check_interval} "
+        f"dump_dir={watchdog_config.dump_dir!r}"
+    )
+    if logger is not None:
+        logger.info(config_msg)
+    else:
+        print(config_msg)
     if not watchdog_config.dump_dir:
         return _watch_dog
     _watch_dog.set_name(name)
@@ -234,5 +253,7 @@ def start_watch_dog(name: str, watchdog_config: "WatchdogConfig") -> WatchDog:
         check_interval=watchdog_config.check_interval,
         dump_dir=watchdog_config.dump_dir,
     )
+    if logger is not None:
+        _watch_dog.set_logger(logger)
     _watch_dog.start()
     return _watch_dog
