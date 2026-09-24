@@ -25,8 +25,7 @@ def test_default_initialization():
     )
     assert wd.num_timeouts == 0
     assert wd.num_recoveries == 0
-    assert wd.timeout_duration == 0.0
-    assert wd._timeout_start_time is None
+    assert not wd._is_timeout_active
 
 
 def test_set_name_does_not_rebuild_dump_file():
@@ -285,11 +284,11 @@ class TestCheckLoop:
 
         mock_dump.assert_not_called()
         assert wd.num_timeouts == 0
-        assert wd._timeout_start_time is None
+        assert not wd._is_timeout_active
 
     def test_counts_timeout_once_and_recovery_on_feed(self):
         """Verify the check loop counts a timeout only once per stale feed
-        epoch and feed() settles the recovery stats."""
+        epoch and feed() records the recovery."""
         wd = WatchDog()
         wd._timeout = 0.01
         wd._last_feed_time = time.monotonic() - 10  # already timed out
@@ -306,13 +305,12 @@ class TestCheckLoop:
 
         assert wd.num_timeouts == 1
         assert mock_dump.call_count == 1
-        assert wd._timeout_start_time is not None
+        assert wd._is_timeout_active
 
         wd.feed()  # the process recovers
         assert wd.num_timeouts == 1
         assert wd.num_recoveries == 1
-        assert wd.timeout_duration > 0.0
-        assert wd._timeout_start_time is None
+        assert not wd._is_timeout_active
 
         # A subsequent feed in the normal state must not double-count.
         wd.feed()
@@ -341,19 +339,16 @@ class TestCheckLoop:
         assert stats.name == "vllm"
         assert stats.num_timeouts == 1
         assert stats.num_recoveries == 0
-        assert stats.timeout_duration == 0.0
 
-        wd.feed()  # settle the recovery duration
+        wd.feed()  # record the recovery
         stats = wd.take_timeout_stats()
         assert stats.name == "vllm"
         assert stats.num_timeouts == 0
         assert stats.num_recoveries == 1
-        assert stats.timeout_duration > 0.0
 
         assert wd.num_timeouts == 0
         assert wd.num_recoveries == 0
-        assert wd.timeout_duration == 0.0
-        assert wd._timeout_start_time is None
+        assert not wd._is_timeout_active
 
 
 def test_get_watch_dog_returns_shared_singleton():

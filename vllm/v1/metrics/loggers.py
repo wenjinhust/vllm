@@ -512,17 +512,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.counter_watchdog_recoveries = counter_watchdog_recoveries
 
-        gauge_watchdog_timeout_duration = self._gauge_cls(
-            name="vllm:watchdog_timeout_duration_seconds",
-            documentation=(
-                "Wall-clock seconds of the most recent watchdog feed-timeout "
-                "before recovery."
-            ),
-            multiprocess_mode="mostrecent",
-            labelnames=watchdog_labelnames,
-        )
-        self.gauge_watchdog_timeout_duration = gauge_watchdog_timeout_duration
-
         #
         # Scheduler state
         #
@@ -1191,11 +1180,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.counter_watchdog_timeouts.labels(*labels).inc(wstat.num_timeouts)
                 self.counter_watchdog_recoveries.labels(*labels).inc(
                     wstat.num_recoveries
-                )
-                # Always refresh so the gauge drops back to 0 once no new
-                # timeout is observed in the current window.
-                self.gauge_watchdog_timeout_duration.labels(*labels).set(
-                    wstat.timeout_duration
                 )
 
             if (
