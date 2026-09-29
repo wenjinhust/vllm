@@ -650,7 +650,7 @@ class WorkerProc:
         shared_worker_lock: LockType,
         is_driver_worker: bool,
     ):
-        """Initialize the worker process and start its watchdog."""
+        """Initialize the worker process."""
         self.rank = rank
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call

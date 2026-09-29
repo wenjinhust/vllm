@@ -1105,8 +1105,7 @@ class EngineCoreProc(EngineCore):
         *,
         engine_index: int = 0,
     ):
-        """Initialize the engine core process with handshakes, I/O threads,
-        and watchdog setup."""
+        """Initialize the engine core process."""
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
         executor_fail_callback = lambda: self.input_queue.put_nowait(
@@ -1415,7 +1414,6 @@ class EngineCoreProc(EngineCore):
             signal_callback = SignalCallback(wakeup_engine)
 
             def signal_handler(signum, frame):
-                """Dump the watchdog stack and trigger shutdown on signal."""
                 signal_name = signal.Signals(signum).name
                 logger.info(
                     "[shutdown] EngineCore: trigger received signal=%s",
