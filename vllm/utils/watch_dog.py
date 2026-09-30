@@ -4,32 +4,47 @@ import faulthandler
 import os
 import threading
 import time
-from pathlib import Path
-from typing import TYPE_CHECKING
+from abc import ABC, abstractmethod
+from logging import Logger
 
-if TYPE_CHECKING:
-    from logging import Logger
-
-    from vllm.config import WatchdogConfig
-
-_DEFAULT_NAME = "vllm"
-_DEFAULT_TIMEOUT = 300
-_DEFAULT_INTERVAL = 10
+from vllm.config import WatchdogConfig
 
 
-def _user_root_dir() -> str:
-    """Return the per-user vLLM runtime directory (under the home folder)."""
-    return os.path.join(Path.home(), "vllm")
+class WatchDog(ABC):
+    @abstractmethod
+    def feed(self):
+        return NotImplementedError
+
+    @abstractmethod
+    def dump_stack(self, reason):
+        return NotImplementedError
 
 
-class WatchDog:
-    def __init__(self):
-        """Initialize the watchdog with default name, timeout, and check
-        interval."""
-        self._name = _DEFAULT_NAME
-        self._timeout = _DEFAULT_TIMEOUT
-        self._check_interval = _DEFAULT_INTERVAL
-        self._dump_seq = 1
+class WatchDogNoop(WatchDog):
+    def feed(self):
+        pass
+
+    def dump_stack(self, reason):
+        pass
+
+
+class WatchDogRaw(WatchDog):
+    def __init__(
+        self,
+        name: str,
+        watchdog_config: WatchdogConfig,
+        logger: Logger | None = None,
+    ):
+        """Initialize the watchdog."""
+        self._name = name
+        self._timeout = watchdog_config.timeout
+        self._check_interval = watchdog_config.check_interval
+        self._dump_dir = watchdog_config.dump_dir
+        self._dump_file = os.path.join(
+            self._dump_dir,
+            f"VLLM_STACK_DUMP_for_{self._name}_{os.getpid()}.log",
+        )
+        self._logger = logger
 
         # Initialize feed time to current time to avoid immediate timeout on startup
         self._last_feed_time = time.monotonic()
@@ -37,41 +52,10 @@ class WatchDog:
         # timeout is always logged
         self._last_timeout_log = 0.0
 
+        self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        self._thread = None
+        self._dump_seq = 1
         self._dump_lock = threading.Lock()
-        self._dump_dir = os.path.join(_user_root_dir(), "dump")
-        self._dump_file = os.path.join(
-            self._dump_dir,
-            f"VLLM_STACK_DUMP_for_{self._name}_{os.getpid()}.log",
-        )
-        self._logger = None
-
-    def set_name(self, name):
-        """Set the watchdog name for debugging."""
-        self._name = name
-
-    def set_config(
-        self,
-        timeout: int | None = None,
-        check_interval: int | None = None,
-        dump_dir: str | None = None,
-    ) -> None:
-        """Override watchdog parameters before start()."""
-        if timeout is not None:
-            self._timeout = timeout
-        if check_interval is not None:
-            self._check_interval = check_interval
-        if dump_dir is not None:
-            self._dump_dir = dump_dir
-            self._dump_file = os.path.join(
-                dump_dir,
-                f"VLLM_STACK_DUMP_for_{self._name}_{os.getpid()}.log",
-            )
-
-    def set_logger(self, logger):
-        """Set the logger used to report stack-dump failures."""
-        self._logger = logger
 
     def feed(self):
         """Feed interface, external callers use this to update last feed time"""
@@ -153,7 +137,7 @@ class WatchDog:
                 self._thread = None
 
 
-_watch_dog = WatchDog()
+_watch_dog: WatchDog = WatchDogNoop()
 
 
 def get_watch_dog() -> WatchDog:
@@ -163,8 +147,8 @@ def get_watch_dog() -> WatchDog:
 
 def start_watch_dog(
     name: str,
-    watchdog_config: "WatchdogConfig",
-    logger: "Logger | None" = None,
+    watchdog_config: WatchdogConfig,
+    logger: Logger | None = None,
 ) -> WatchDog:
     """Start the process-wide WatchDog background thread if enabled.
 
@@ -181,19 +165,14 @@ def start_watch_dog(
         logger.info(config_msg)
     else:
         print(config_msg)
+
+    global _watch_dog
     if not watchdog_config.dump_dir:
         return _watch_dog
 
     faulthandler.enable(all_threads=True)
     os.makedirs(watchdog_config.dump_dir, exist_ok=True)
 
-    _watch_dog.set_name(name)
-    _watch_dog.set_config(
-        timeout=watchdog_config.timeout,
-        check_interval=watchdog_config.check_interval,
-        dump_dir=watchdog_config.dump_dir,
-    )
-    if logger is not None:
-        _watch_dog.set_logger(logger)
+    _watch_dog = WatchDogRaw(name, watchdog_config, logger)
     _watch_dog.start()
     return _watch_dog
