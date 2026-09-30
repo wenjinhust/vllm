@@ -4,7 +4,6 @@ import faulthandler
 import os
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,15 +22,6 @@ def _user_root_dir() -> str:
     return os.path.join(Path.home(), "vllm")
 
 
-@dataclass
-class WatchdogStat:
-    """Statistics snapshot of the watchdog for one reporting window."""
-
-    name: str
-    num_timeouts: int
-    num_recoveries: int
-
-
 class WatchDog:
     def __init__(self):
         """Initialize the watchdog with default name, timeout, and check
@@ -46,12 +36,6 @@ class WatchDog:
         # Last timeout log time, initialized to 0 to ensure the first
         # timeout is always logged
         self._last_timeout_log = 0.0
-
-        # Timeout statistics.
-        self._num_timeouts = 0
-        self._num_recoveries = 0
-        # Whether the watchdog is currently in a timeout state.
-        self._is_timeout_active = False
 
         self._stop_event = threading.Event()
         self._thread = None
@@ -91,14 +75,8 @@ class WatchDog:
 
     def feed(self):
         """Feed interface, external callers use this to update last feed time"""
-        now = time.monotonic()
-        if self._is_timeout_active:
-            # The process hung and is now responsive again: record the
-            # recovery.
-            self._num_recoveries += 1
-            self._is_timeout_active = False
         # Single float assignment is atomic in CPython
-        self._last_feed_time = now
+        self._last_feed_time = time.monotonic()
 
     def dump_stack(self, reason):
         """Dump all thread stack traces to the dump file for the given reason."""
@@ -145,10 +123,6 @@ class WatchDog:
                 # the timeout hasn't been logged since the last feed; update
                 # the log timestamp to avoid duplicate logs.
                 self._last_timeout_log = now
-                # The timeout started once the last feed went stale; the
-                # recovery is settled in feed().
-                self._is_timeout_active = True
-                self._num_timeouts += 1
                 self.dump_stack("feed timeout")
             # If not timed out, do nothing and keep _last_timeout_log unchanged
 
@@ -176,36 +150,6 @@ class WatchDog:
                 # exited; keeping it otherwise prevents a later start()
                 # from creating a duplicate live monitor thread.
                 self._thread = None
-
-    @property
-    def num_timeouts(self) -> int:
-        """Total number of feed timeouts observed."""
-        return self._num_timeouts
-
-    @property
-    def num_recoveries(self) -> int:
-        """Total number of times the process recovered from a timeout."""
-        return self._num_recoveries
-
-    def take_timeout_stats(self) -> WatchdogStat:
-        """Return the accumulated timeout statistics and reset them.
-
-        Intended for periodic reporting (e.g. attached to per-step outputs)
-        so that each consumer observes only the stats since the last read.
-
-        Returns:
-            A ``WatchdogStat`` carrying the watchdog name plus
-            (num_timeouts, num_recoveries).
-
-        """
-        stats = WatchdogStat(
-            name=self._name,
-            num_timeouts=self._num_timeouts,
-            num_recoveries=self._num_recoveries,
-        )
-        self._num_timeouts = 0
-        self._num_recoveries = 0
-        return stats
 
 
 _watch_dog = WatchDog()
