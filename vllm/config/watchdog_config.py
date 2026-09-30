@@ -5,8 +5,6 @@ from pydantic import Field
 
 from vllm.config.utils import config
 
-# These values must be kept in sync with the defaults in
-# vllm/utils/watch_dog.py (WatchDog).
 _DEFAULT_TIMEOUT = 300
 _DEFAULT_CHECK_INTERVAL = 10
 
