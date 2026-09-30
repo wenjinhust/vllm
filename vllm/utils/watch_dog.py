@@ -5,9 +5,8 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
-
-from vllm.utils.safe_fs import get_user_root_dir, prepare_private_dir, safe_open_file
 
 if TYPE_CHECKING:
     from logging import Logger
@@ -17,6 +16,11 @@ if TYPE_CHECKING:
 _DEFAULT_NAME = "vllm"
 _DEFAULT_TIMEOUT = 300
 _DEFAULT_INTERVAL = 10
+
+
+def _user_root_dir() -> str:
+    """Return the per-user vLLM runtime directory (under the home folder)."""
+    return os.path.join(Path.home(), "vllm")
 
 
 @dataclass
@@ -52,7 +56,7 @@ class WatchDog:
         self._stop_event = threading.Event()
         self._thread = None
         self._dump_lock = threading.Lock()
-        self._dump_dir = os.path.join(get_user_root_dir(), "dump")
+        self._dump_dir = os.path.join(_user_root_dir(), "dump")
         self._dump_file = os.path.join(
             self._dump_dir,
             f"VLLM_STACK_DUMP_for_{self._name}_{os.getpid()}.log",
@@ -100,7 +104,7 @@ class WatchDog:
         """Dump all thread stack traces to the dump file for the given reason."""
         try:
             with self._dump_lock:
-                with safe_open_file(self._dump_file, "a") as f:
+                with open(self._dump_file, "a") as f:
                     f.write(
                         f"\nCall stack dump #{self._dump_seq} at "
                         f"{time.ctime()} due to {reason}\n\n"
@@ -154,8 +158,6 @@ class WatchDog:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event.clear()
-        faulthandler.enable(all_threads=True)
-        prepare_private_dir(self._dump_dir)
         self._thread = threading.Thread(target=self._check_loop, daemon=True)
         self.feed()
         self._thread.start()
@@ -229,7 +231,7 @@ def start_watch_dog(
         "[Watchdog]Start with "
         f"timeout={watchdog_config.timeout} "
         f"check_interval={watchdog_config.check_interval} "
-        f"dump_dir={watchdog_config.dump_dir!r}"
+        f"dump_dir={watchdog_config.dump_dir}"
     )
     if logger is not None:
         logger.info(config_msg)
@@ -237,6 +239,10 @@ def start_watch_dog(
         print(config_msg)
     if not watchdog_config.dump_dir:
         return _watch_dog
+
+    faulthandler.enable(all_threads=True)
+    os.makedirs(watchdog_config.dump_dir, exist_ok=True)
+
     _watch_dog.set_name(name)
     _watch_dog.set_config(
         timeout=watchdog_config.timeout,

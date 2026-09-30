@@ -5,8 +5,12 @@ import time
 from unittest.mock import MagicMock, patch
 
 from vllm.config import WatchdogConfig
-from vllm.utils.safe_fs import get_user_root_dir
-from vllm.utils.watch_dog import WatchDog, get_watch_dog, start_watch_dog
+from vllm.utils.watch_dog import (
+    WatchDog,
+    _user_root_dir,
+    get_watch_dog,
+    start_watch_dog,
+)
 
 
 def test_default_initialization():
@@ -19,7 +23,7 @@ def test_default_initialization():
     assert wd._thread is None
     assert wd._logger is None
     assert not wd._stop_event.is_set()
-    assert wd._dump_dir == os.path.join(get_user_root_dir(), "dump")
+    assert wd._dump_dir == os.path.join(_user_root_dir(), "dump")
     assert wd._dump_file == os.path.join(
         wd._dump_dir, f"VLLM_STACK_DUMP_for_vllm_{os.getpid()}.log"
     )
@@ -70,7 +74,7 @@ def test_set_config_updates_check_interval_only():
     wd.set_config(check_interval=1)
     assert wd._check_interval == 1
     assert wd._timeout == 300
-    assert wd._dump_dir == os.path.join(get_user_root_dir(), "dump")
+    assert wd._dump_dir == os.path.join(_user_root_dir(), "dump")
 
 
 def test_set_config_combines_all_parameters(tmp_path):
@@ -105,13 +109,13 @@ def test_feed_updates_last_feed_time():
 
 def test_dump_stack_writes_traceback_files(tmp_path):
     """Verify dump_stack() appends numbered traceback entries to the dump
-    file. The dump directory is prepared by start(), so the watchdog must be
-    started first."""
-    with patch("vllm.utils.watch_dog.get_user_root_dir", return_value=str(tmp_path)):
+    file. The dump directory must exist before dumping."""
+    with patch("vllm.utils.watch_dog._user_root_dir", return_value=str(tmp_path)):
         wd = WatchDog()
     wd.set_name("test_proc")
     wd.set_config(dump_dir=str(tmp_path / "dump"))
-    wd.start()  # prepares the private dump directory
+    os.makedirs(wd._dump_dir)
+    wd.start()
     try:
         wd.dump_stack("timeout")
         wd.dump_stack("heartbeat lost")
@@ -129,31 +133,13 @@ def test_dump_stack_writes_traceback_files(tmp_path):
     assert wd._dump_seq == 3
 
 
-def test_start_prepares_private_dir_and_dump_safe_opens(tmp_path):
-    """Verify start() prepares the private dump directory and dump_stack()
-    opens the file with no-follow semantics."""
-    with patch("vllm.utils.watch_dog.get_user_root_dir", return_value=str(tmp_path)):
-        wd = WatchDog()
-    with (
-        patch("vllm.utils.watch_dog.prepare_private_dir") as mock_prep,
-        patch("vllm.utils.watch_dog.safe_open_file") as mock_open,
-        patch("vllm.utils.watch_dog.threading.Thread") as mock_thread,
-    ):
-        wd.start()
-        wd.dump_stack("timeout")
-        wd.stop()
-    mock_prep.assert_called_once_with(str(tmp_path / "dump"))
-    mock_open.assert_called_once_with(wd._dump_file, "a")
-    mock_thread.assert_called_once()
-
-
 def test_dump_stack_logs_failure_via_logger(tmp_path):
     """Verify dump failures are reported through the configured logger."""
-    with patch("vllm.utils.watch_dog.get_user_root_dir", return_value=str(tmp_path)):
+    with patch("vllm.utils.watch_dog._user_root_dir", return_value=str(tmp_path)):
         wd = WatchDog()
     logger = MagicMock()
     wd.set_logger(logger)
-    with patch("vllm.utils.watch_dog.safe_open_file", side_effect=OSError("boom")):
+    with patch("builtins.open", side_effect=OSError("boom")):
         wd.dump_stack("timeout")
     logger.warning.assert_called_once()
     message = logger.warning.call_args[0][0]
@@ -165,9 +151,9 @@ def test_dump_stack_logs_failure_via_logger(tmp_path):
 
 def test_dump_stack_swallows_failure_without_logger(tmp_path):
     """Verify dump failures are silently ignored without a logger."""
-    with patch("vllm.utils.watch_dog.get_user_root_dir", return_value=str(tmp_path)):
+    with patch("vllm.utils.watch_dog._user_root_dir", return_value=str(tmp_path)):
         wd = WatchDog()
-    with patch("vllm.utils.watch_dog.safe_open_file", side_effect=OSError("boom")):
+    with patch("builtins.open", side_effect=OSError("boom")):
         wd.dump_stack("timeout")  # must not raise
     assert wd._dump_seq == 1  # not incremented on failure
 
@@ -175,8 +161,7 @@ def test_dump_stack_swallows_failure_without_logger(tmp_path):
 def test_start_launches_daemon_thread():
     """Verify start() spawns a live daemon monitor thread."""
     wd = WatchDog()
-    with patch("vllm.utils.watch_dog.prepare_private_dir"):
-        wd.start()
+    wd.start()
     assert wd._thread is not None
     assert wd._thread.is_alive()
     assert wd._thread.daemon is True
@@ -187,10 +172,9 @@ def test_start_launches_daemon_thread():
 def test_start_is_noop_when_thread_already_running():
     """Verify a second start() does not spawn another monitor thread."""
     wd = WatchDog()
-    with patch("vllm.utils.watch_dog.prepare_private_dir"):
-        wd.start()
-        original_thread = wd._thread
-        wd.start()
+    wd.start()
+    original_thread = wd._thread
+    wd.start()
     assert wd._thread is original_thread
     wd.stop()
 
@@ -198,8 +182,7 @@ def test_start_is_noop_when_thread_already_running():
 def test_stop_sets_event_and_clears_thread():
     """Verify stop() sets the stop event and clears the thread reference."""
     wd = WatchDog()
-    with patch("vllm.utils.watch_dog.prepare_private_dir"):
-        wd.start()
+    wd.start()
     wd.stop()
     assert wd._stop_event.is_set()
     assert wd._thread is None
@@ -399,14 +382,13 @@ def test_start_watch_dog_applies_config_and_starts(tmp_path):
 def test_dump_stack_logs_success_via_logger(tmp_path):
     """Verify a successful dump is reported through the configured logger and
     increments the dump sequence."""
-    with patch("vllm.utils.watch_dog.get_user_root_dir", return_value=str(tmp_path)):
+    with patch("vllm.utils.watch_dog._user_root_dir", return_value=str(tmp_path)):
         wd = WatchDog()
     wd.set_config(dump_dir=str(tmp_path / "dump"))
     os.makedirs(wd._dump_dir)  # prepare the dump directory
     logger = MagicMock()
     wd.set_logger(logger)
-    with patch("vllm.utils.watch_dog.safe_open_file", side_effect=open):
-        wd.dump_stack("timeout")
+    wd.dump_stack("timeout")
     logger.info.assert_called_once()
     message = logger.info.call_args[0][0]
     assert "[Watchdog]Dumped stack to" in message
