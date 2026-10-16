@@ -231,6 +231,8 @@ def start_watch_dog(
         return _watch_dog
 
     _watch_dog = WatchDogThread(name, watchdog_config, logger)
-    _watch_dog.register_handler(FaultHandlerWrapper(name, watchdog_config.dump_dir, logger))
+    _watch_dog.register_handler(
+        FaultHandlerWrapper(name, watchdog_config.dump_dir, logger)
+    )
     _watch_dog.start()
     return _watch_dog
