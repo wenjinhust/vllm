@@ -11,9 +11,10 @@ import pytest
 from vllm.config import WatchdogConfig
 from vllm.utils import watch_dog as watch_dog_module
 from vllm.utils.watch_dog import (
+    FaultHandlerWrapper,
     WatchDog,
     WatchDogNoop,
-    WatchDogRaw,
+    WatchDogThread,
     get_watch_dog,
     start_watch_dog,
 )
@@ -21,68 +22,67 @@ from vllm.utils.watch_dog import (
 
 @pytest.fixture(autouse=True)
 def _reset_global_watch_dog():
-    """Reset the module-level WatchDog singleton between tests."""
+    """Reset the module-level WatchDog singleton and the handler registry
+    between tests."""
     original = watch_dog_module._watch_dog
     watch_dog_module._watch_dog = WatchDogNoop()
+    WatchDogThread.clear_handlers()
     yield
     watch_dog_module._watch_dog = original
+    WatchDogThread.clear_handlers()
 
 
 def test_watch_dog_is_abstract_base_class():
-    """Verify WatchDog declares the feed()/dump_stack() contract."""
+    """Verify WatchDog declares the feed()/handle_failure() contract."""
     assert issubclass(WatchDog, ABC)
-    assert {"feed", "dump_stack"} <= WatchDog.__abstractmethods__
+    assert {"feed", "handle_failure"} <= WatchDog.__abstractmethods__
     with pytest.raises(TypeError):
         WatchDog()  # type: ignore[abstract]
 
 
 def test_watch_dog_noop_is_inert():
-    """Verify WatchDogNoop accepts feed() and dump_stack() without doing
+    """Verify WatchDogNoop accepts feed() and handle_failure() without doing
     anything."""
     wd = WatchDogNoop()
     assert isinstance(wd, WatchDog)
     wd.feed()
-    wd.dump_stack("timeout")
+    wd.handle_failure("timeout")
     with wd.disable():
         wd.feed()
 
 
-def test_watch_dog_raw_initialization(tmp_path):
-    """Verify WatchDogRaw derives its settings from the given name, config,
-    and logger."""
+def test_watch_dog_thread_initialization(tmp_path):
+    """Verify WatchDogThread derives its settings from the given name,
+    config, and logger."""
     logger = MagicMock()
     config = WatchdogConfig(timeout=30, check_interval=5, dump_dir=str(tmp_path))
-    wd = WatchDogRaw("worker_0", config, logger)
+    wd = WatchDogThread("worker_0", config, logger)
     assert wd._name == "worker_0"
     assert wd._timeout == 30
     assert wd._check_interval == 5
-    assert wd._dump_dir == str(tmp_path)
-    assert wd._dump_file == os.path.join(
-        str(tmp_path), f"VLLM_STACK_DUMP_for_worker_0_{os.getpid()}.log"
-    )
     assert wd._logger is logger
-    assert wd._dump_seq == 1
     assert wd._thread is None
     assert not wd._stop_event.is_set()
 
 
 def test_feed_updates_last_feed_time(tmp_path):
     """Verify feed() advances the last-feed timestamp."""
-    wd = WatchDogRaw("vllm", WatchdogConfig(dump_dir=str(tmp_path)), MagicMock())
+    wd = WatchDogThread("vllm", WatchdogConfig(dump_dir=str(tmp_path)), MagicMock())
     before = time.monotonic()
     wd.feed()
     assert wd._last_feed_time >= before
     assert wd._last_feed_time <= time.monotonic()
 
 
-def test_dump_stack_writes_traceback_files(tmp_path):
-    """Verify dump_stack() appends numbered traceback entries to the dump
-    file. The dump directory must exist before dumping."""
+def test_handle_failure_writes_traceback_files(tmp_path):
+    """Verify handle_failure() routes to the registered stack-dump handler,
+    appending numbered traceback entries to the dump file."""
     config = WatchdogConfig(dump_dir=str(tmp_path / "dump"))
-    os.makedirs(config.dump_dir)
-    wd = WatchDogRaw("test_proc", config, MagicMock())
-    wd.dump_stack("timeout")
-    wd.dump_stack("heartbeat lost")
+    wd = WatchDogThread("test_proc", config, MagicMock())
+    handler = FaultHandlerWrapper("test_proc", config.dump_dir, MagicMock())
+    wd.register_handler(handler)
+    wd.handle_failure("timeout")
+    wd.handle_failure("heartbeat lost")
 
     log_file = tmp_path / "dump" / (f"VLLM_STACK_DUMP_for_test_proc_{os.getpid()}.log")
     assert log_file.exists()
@@ -92,44 +92,47 @@ def test_dump_stack_writes_traceback_files(tmp_path):
     assert "Call stack dump #2" in content
     assert "due to heartbeat lost" in content
     assert "===" in content
-    assert wd._dump_seq == 3
+    assert handler._dump_seq == 3
 
 
-def test_dump_stack_logs_failure_via_logger(tmp_path):
+def test_handle_failure_logs_failure_via_logger(tmp_path):
     """Verify dump failures are reported through the configured logger."""
     logger = MagicMock()
-    wd = WatchDogRaw("vllm", WatchdogConfig(dump_dir=str(tmp_path)), logger)
+    wd = WatchDogThread("vllm", WatchdogConfig(dump_dir=str(tmp_path)), MagicMock())
+    handler = FaultHandlerWrapper("vllm", str(tmp_path), logger)
+    wd.register_handler(handler)
     with patch("builtins.open", side_effect=OSError("boom")):
-        wd.dump_stack("timeout")
+        wd.handle_failure("timeout")
     logger.warning.assert_called_once()
     message = logger.warning.call_args[0][0]
     args = logger.warning.call_args[0][1:]
     assert message == "[Watchdog]Failed to dump stack trace to %s: %s"
-    assert args[0] == wd._dump_file
+    assert args[0] == handler._dump_file
     assert isinstance(args[1], OSError) and str(args[1]) == "boom"
-    assert wd._dump_seq == 1  # not incremented on failure
+    assert handler._dump_seq == 1  # not incremented on failure
 
 
-def test_dump_stack_logs_success_via_logger(tmp_path):
+def test_handle_failure_logs_success_via_logger(tmp_path):
     """Verify a successful dump is reported through the configured logger and
     increments the dump sequence."""
     config = WatchdogConfig(dump_dir=str(tmp_path / "dump"))
-    os.makedirs(config.dump_dir)
     logger = MagicMock()
-    wd = WatchDogRaw("vllm", config, logger)
-    wd.dump_stack("timeout")
+    wd = WatchDogThread("vllm", config, MagicMock())
+    handler = FaultHandlerWrapper("vllm", config.dump_dir, logger)
+    wd.register_handler(handler)
+    wd.handle_failure("timeout")
     logger.info.assert_called_once()
     message = logger.info.call_args[0][0]
     args = logger.info.call_args[0][1:]
     assert message == "[Watchdog]Dumped stack to %s due to %s"
-    assert args == (wd._dump_file, "timeout")
-    assert os.path.exists(wd._dump_file)
-    assert wd._dump_seq == 2  # incremented on success
+    assert args == (handler._dump_file, "timeout")
+    assert os.path.exists(handler._dump_file)
+    assert handler._dump_seq == 2  # incremented on success
 
 
 def test_start_launches_daemon_thread(tmp_path):
     """Verify start() spawns a live daemon monitor thread."""
-    wd = WatchDogRaw("vllm", WatchdogConfig(dump_dir=str(tmp_path)), MagicMock())
+    wd = WatchDogThread("vllm", WatchdogConfig(dump_dir=str(tmp_path)), MagicMock())
     wd.start()
     assert wd._thread is not None
     assert wd._thread.is_alive()
@@ -140,7 +143,7 @@ def test_start_launches_daemon_thread(tmp_path):
 
 def test_start_is_noop_when_thread_already_running(tmp_path):
     """Verify a second start() does not spawn another monitor thread."""
-    wd = WatchDogRaw("vllm", WatchdogConfig(dump_dir=str(tmp_path)), MagicMock())
+    wd = WatchDogThread("vllm", WatchdogConfig(dump_dir=str(tmp_path)), MagicMock())
     wd.start()
     original_thread = wd._thread
     wd.start()
@@ -150,7 +153,7 @@ def test_start_is_noop_when_thread_already_running(tmp_path):
 
 def test_stop_sets_event_and_clears_thread(tmp_path):
     """Verify stop() sets the stop event and clears the thread reference."""
-    wd = WatchDogRaw("vllm", WatchdogConfig(dump_dir=str(tmp_path)), MagicMock())
+    wd = WatchDogThread("vllm", WatchdogConfig(dump_dir=str(tmp_path)), MagicMock())
     wd.start()
     wd.stop()
     assert wd._stop_event.is_set()
@@ -159,7 +162,7 @@ def test_stop_sets_event_and_clears_thread(tmp_path):
 
 def test_stop_without_start_does_not_raise(tmp_path):
     """Verify stop() is safe to call before start()."""
-    wd = WatchDogRaw("vllm", WatchdogConfig(dump_dir=str(tmp_path)), MagicMock())
+    wd = WatchDogThread("vllm", WatchdogConfig(dump_dir=str(tmp_path)), MagicMock())
     wd.stop()
     assert wd._stop_event.is_set()
     assert wd._thread is None
@@ -169,8 +172,10 @@ class TestCheckLoop:
     """Tests for the internal background check loop."""
 
     @staticmethod
-    def _make_watchdog(tmp_path) -> WatchDogRaw:
-        return WatchDogRaw("vllm", WatchdogConfig(dump_dir=str(tmp_path)), MagicMock())
+    def _make_watchdog(tmp_path) -> WatchDogThread:
+        return WatchDogThread(
+            "vllm", WatchdogConfig(dump_dir=str(tmp_path)), MagicMock()
+        )
 
     @staticmethod
     def _fake_wait_that_exits_after(count, target=2):
@@ -187,7 +192,7 @@ class TestCheckLoop:
         wd._last_feed_time = time.monotonic() - 10  # already timed out
 
         with (
-            patch.object(wd, "dump_stack") as mock_dump,
+            patch.object(wd, "handle_failure") as mock_dump,
             patch.object(
                 wd._stop_event,
                 "wait",
@@ -206,7 +211,7 @@ class TestCheckLoop:
         wd._last_feed_time = time.monotonic() - 10  # already timed out
 
         with (
-            patch.object(wd, "dump_stack") as mock_dump,
+            patch.object(wd, "handle_failure") as mock_dump,
             patch.object(
                 wd._stop_event,
                 "wait",
@@ -221,7 +226,7 @@ class TestCheckLoop:
         wd._last_timeout_log = 0.0
         wd._last_feed_time = time.monotonic() - 10
         with (
-            patch.object(wd, "dump_stack") as mock_dump,
+            patch.object(wd, "handle_failure") as mock_dump,
             patch.object(
                 wd._stop_event,
                 "wait",
@@ -243,7 +248,7 @@ class TestCheckLoop:
         wd._last_timeout_log = wd._last_feed_time + 1
 
         with (
-            patch.object(wd, "dump_stack") as mock_dump,
+            patch.object(wd, "handle_failure") as mock_dump,
             patch.object(
                 wd._stop_event,
                 "wait",
@@ -260,7 +265,7 @@ class TestCheckLoop:
         wd._last_feed_time = time.monotonic()  # freshly fed
 
         with (
-            patch.object(wd, "dump_stack") as mock_dump,
+            patch.object(wd, "handle_failure") as mock_dump,
             patch.object(
                 wd._stop_event,
                 "wait",
@@ -281,7 +286,7 @@ class TestCheckLoop:
         assert wd._active
         with (
             wd.disable(),
-            patch.object(wd, "dump_stack") as mock_dump,
+            patch.object(wd, "handle_failure") as mock_dump,
             patch.object(
                 wd._stop_event,
                 "wait",
@@ -337,27 +342,31 @@ def test_start_watch_dog_stays_dormant_without_dump_dir():
     assert isinstance(result, WatchDogNoop)
 
 
-def test_start_watch_dog_creates_raw_and_starts(tmp_path):
-    """Verify start_watch_dog() swaps in a WatchDogRaw and starts its
-    background thread when dump_dir is set."""
+def test_start_watch_dog_creates_thread_and_starts(tmp_path):
+    """Verify start_watch_dog() swaps in a WatchDogThread with a registered
+    FaultHandlerWrapper and starts its background thread when dump_dir is
+    set."""
     config = WatchdogConfig(timeout=30, check_interval=5, dump_dir=str(tmp_path))
     noop = WatchDogNoop()
     with patch.object(watch_dog_module, "_watch_dog", noop):
         result = start_watch_dog("engine_7", config, MagicMock())
     try:
-        assert isinstance(result, WatchDogRaw)
+        assert isinstance(result, WatchDogThread)
         assert result._name == "engine_7"
         assert result._timeout == 30
         assert result._check_interval == 5
-        assert result._dump_dir == str(tmp_path)
-        assert result._dump_file == os.path.join(
+        assert len(result._registry) == 1
+        handler = result._registry[0]
+        assert isinstance(handler, FaultHandlerWrapper)
+        assert handler._dump_dir == str(tmp_path)
+        assert handler._dump_file == os.path.join(
             str(tmp_path), f"VLLM_STACK_DUMP_for_engine_7_{os.getpid()}.log"
         )
         assert result._thread is not None
         assert result._thread.is_alive()
         assert result._thread.daemon is True
     finally:
-        cast(WatchDogRaw, result).stop()
+        cast(WatchDogThread, result).stop()
 
 
 def test_start_watch_dog_attaches_logger(tmp_path):
@@ -369,7 +378,7 @@ def test_start_watch_dog_attaches_logger(tmp_path):
     with patch.object(watch_dog_module, "_watch_dog", noop):
         result = start_watch_dog("engine_0", config, logger)
     try:
-        assert isinstance(result, WatchDogRaw)
+        assert isinstance(result, WatchDogThread)
         assert result._logger is logger
     finally:
-        cast(WatchDogRaw, result).stop()
+        cast(WatchDogThread, result).stop()

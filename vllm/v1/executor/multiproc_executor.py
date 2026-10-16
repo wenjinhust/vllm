@@ -842,7 +842,7 @@ class WorkerProc:
                 death_pipe.recv()
             except EOFError:
                 logger.info_once("Parent process exited, terminating worker queues")
-                get_watch_dog().dump_stack("shutdown")
+                get_watch_dog().handle_failure("shutdown")
                 shutdown_requested.set()
                 for mq in queues_to_shutdown:
                     if mq is not None:
