@@ -11,13 +11,84 @@ from logging import Logger
 from vllm.config import WatchdogConfig
 
 
-class WatchDog(ABC):
+class WatchDogHandler(ABC):
+    @abstractmethod
+    def handle(self, reason):
+        return NotImplementedError
+
+
+class FaultHandlerWrapper(WatchDogHandler):
+    def __init__(
+        self,
+        name: str,
+        dump_dir: str,
+        logger: Logger,
+    ):
+        self._dump_dir = dump_dir
+        self._dump_file = os.path.join(
+            dump_dir,
+            f"VLLM_STACK_DUMP_for_{name}_{os.getpid()}.log",
+        )
+        self._logger = logger
+        self._dump_seq = 1
+        faulthandler.enable(all_threads=True)
+
+    def handle(self, reason):
+        """Append a numbered thread-stack dump to the dump file for the given
+        reason."""
+        try:
+            os.makedirs(self._dump_dir, exist_ok=True)
+            with open(self._dump_file, "a") as f:
+                f.write(
+                    f"\n>>> Call stack dump #{self._dump_seq} at "
+                    f"{time.ctime()} due to {reason}\n\n"
+                )
+                faulthandler.dump_traceback(file=f, all_threads=True)
+                f.write(
+                    "\n================================================================\n"
+                )
+            self._dump_seq += 1
+            self._logger.info(
+                "[Watchdog]Dumped stack to %s due to %s",
+                self._dump_file,
+                reason,
+            )
+        except Exception as e:
+            self._logger.warning(
+                "[Watchdog]Failed to dump stack trace to %s: %s",
+                self._dump_file,
+                e,
+            )
+
+
+class WatchDogHandlerRegistry:
+    _registry: list[WatchDogHandler] = []
+    _lock = threading.Lock()
+
+    @classmethod
+    def register_handler(cls, handler: WatchDogHandler):
+        with cls._lock:
+            cls._registry.append(handler)
+
+    @classmethod
+    def clear_handlers(cls):
+        with cls._lock:
+            cls._registry.clear()
+
+    @classmethod
+    def call_handlers(cls, reason):
+        with cls._lock:
+            for handler in cls._registry:
+                handler.handle(reason)
+
+
+class WatchDog(ABC, WatchDogHandlerRegistry):
     @abstractmethod
     def feed(self):
         return NotImplementedError
 
     @abstractmethod
-    def dump_stack(self, reason):
+    def handle_failure(self, reason):
         return NotImplementedError
 
     @contextmanager
@@ -30,11 +101,11 @@ class WatchDogNoop(WatchDog):
     def feed(self):
         pass
 
-    def dump_stack(self, reason):
+    def handle_failure(self, reason):
         pass
 
 
-class WatchDogRaw(WatchDog):
+class WatchDogThread(WatchDog):
     def __init__(
         self,
         name: str,
@@ -45,11 +116,6 @@ class WatchDogRaw(WatchDog):
         self._name = name
         self._timeout = watchdog_config.timeout
         self._check_interval = watchdog_config.check_interval
-        self._dump_dir = watchdog_config.dump_dir
-        self._dump_file = os.path.join(
-            self._dump_dir,
-            f"VLLM_STACK_DUMP_for_{self._name}_{os.getpid()}.log",
-        )
         self._logger = logger
 
         # Initialize feed time to current time to avoid immediate timeout on startup
@@ -60,8 +126,6 @@ class WatchDogRaw(WatchDog):
 
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        self._dump_seq = 1
-        self._dump_lock = threading.Lock()
         self._active = True
 
     def feed(self):
@@ -80,28 +144,10 @@ class WatchDogRaw(WatchDog):
             assert not self._active
             self._active = True
 
-    def dump_stack(self, reason):
-        """Dump all thread stack traces to the dump file for the given reason."""
-        try:
-            with self._dump_lock:
-                with open(self._dump_file, "a") as f:
-                    f.write(
-                        f"\n>>> Call stack dump #{self._dump_seq} at "
-                        f"{time.ctime()} due to {reason}\n\n"
-                    )
-                    faulthandler.dump_traceback(file=f, all_threads=True)
-                self._dump_seq += 1
-                self._logger.info(
-                    "[Watchdog]Dumped stack to %s due to %s",
-                    self._dump_file,
-                    reason,
-                )
-        except Exception as e:
-            self._logger.warning(
-                "[Watchdog]Failed to dump stack trace to %s: %s",
-                self._dump_file,
-                e,
-            )
+    def handle_failure(self, reason):
+        """Respond to a watchdog failure by saving process/thread state via
+        the registered handlers."""
+        self.call_handlers(reason)
 
     def _check_loop(self):
         """Main loop of the background check thread"""
@@ -126,7 +172,7 @@ class WatchDogRaw(WatchDog):
                 # the timeout hasn't been logged since the last feed; update
                 # the log timestamp to avoid duplicate logs.
                 self._last_timeout_log = now
-                self.dump_stack("feed timeout")
+                self.handle_failure("feed timeout")
             # If not timed out, do nothing and keep _last_timeout_log unchanged
 
     def start(self):
@@ -184,9 +230,7 @@ def start_watch_dog(
     if not watchdog_config.dump_dir:
         return _watch_dog
 
-    faulthandler.enable(all_threads=True)
-    os.makedirs(watchdog_config.dump_dir, exist_ok=True)
-
-    _watch_dog = WatchDogRaw(name, watchdog_config, logger)
+    _watch_dog = WatchDogThread(name, watchdog_config, logger)
+    _watch_dog.register_handler(FaultHandlerWrapper(name, watchdog_config.dump_dir, logger))
     _watch_dog.start()
     return _watch_dog

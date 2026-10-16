@@ -1345,7 +1345,7 @@ class EngineCoreProc(EngineCore):
                     signal_name,
                 )
                 if signum == signal.SIGTERM:
-                    get_watch_dog().dump_stack(signal_name)
+                    get_watch_dog().handle_failure(signal_name)
                 engine_core.shutdown_state = EngineShutdownState.REQUESTED
                 signal_callback.trigger()
 
