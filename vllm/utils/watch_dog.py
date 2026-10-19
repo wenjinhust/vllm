@@ -63,26 +63,31 @@ class FaultHandlerWrapper(WatchDogHandler):
 
 class WatchDogHandlerRegistry:
     _registry: list[WatchDogHandler] = []
-    _lock = threading.Lock()
+    _registry_lock = threading.Lock()
 
     @classmethod
     def register_handler(cls, handler: WatchDogHandler):
-        with cls._lock:
+        with cls._registry_lock:
             cls._registry.append(handler)
 
     @classmethod
+    def insert_handler(cls, handler: WatchDogHandler):
+        with cls._registry_lock:
+            cls._registry.insert(0, handler)
+
+    @classmethod
     def clear_handlers(cls):
-        with cls._lock:
+        with cls._registry_lock:
             cls._registry.clear()
 
     @classmethod
     def call_handlers(cls, reason):
-        with cls._lock:
+        with cls._registry_lock:
             for handler in cls._registry:
                 handler.handle(reason)
 
 
-class WatchDog(ABC, WatchDogHandlerRegistry):
+class WatchDog(ABC):
     @abstractmethod
     def feed(self):
         return NotImplementedError
@@ -105,7 +110,7 @@ class WatchDogNoop(WatchDog):
         pass
 
 
-class WatchDogThread(WatchDog):
+class WatchDogThread(WatchDog, WatchDogHandlerRegistry):
     def __init__(
         self,
         name: str,
@@ -204,6 +209,10 @@ class WatchDogThread(WatchDog):
 _watch_dog: WatchDog = WatchDogNoop()
 
 
+def register_watch_dog_handler(handler: WatchDogHandler):
+    WatchDogHandlerRegistry.register_handler(handler)
+
+
 def get_watch_dog() -> WatchDog:
     """Return the process-wide WatchDog singleton."""
     return _watch_dog
@@ -231,6 +240,8 @@ def start_watch_dog(
         return _watch_dog
 
     _watch_dog = WatchDogThread(name, watchdog_config, logger)
-    _watch_dog.register_handler(FaultHandlerWrapper(name, watchdog_config.dump_dir, logger))
+    _watch_dog.insert_handler(
+        FaultHandlerWrapper(name, watchdog_config.dump_dir, logger)
+    )
     _watch_dog.start()
     return _watch_dog

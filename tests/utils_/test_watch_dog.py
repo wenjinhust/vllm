@@ -16,6 +16,7 @@ from vllm.utils.watch_dog import (
     WatchDogNoop,
     WatchDogThread,
     get_watch_dog,
+    register_watch_dog_handler,
     start_watch_dog,
 )
 
@@ -382,3 +383,161 @@ def test_start_watch_dog_attaches_logger(tmp_path):
         assert result._logger is logger
     finally:
         cast(WatchDogThread, result).stop()
+
+
+def test_registered_handler_called_via_watchdog_singleton(tmp_path):
+    """Verify a custom handler registered on the global watchdog is invoked
+    when handle_failure() is called on the singleton."""
+    config = WatchdogConfig(timeout=30, check_interval=5, dump_dir=str(tmp_path))
+    with patch.object(watch_dog_module, "_watch_dog", WatchDogNoop()):
+        handler = MagicMock()
+        register_watch_dog_handler(handler)
+        start_watch_dog("engine_0", config, MagicMock())
+        try:
+            get_watch_dog().handle_failure("test")
+            handler.handle.assert_called_once_with("test")
+        finally:
+            cast(WatchDogThread, get_watch_dog()).stop()
+
+
+def test_watch_dog_handler_is_abstract_base_class():
+    """Verify WatchDogHandler declares a handle() contract that concrete
+    handlers are forced to implement."""
+    assert issubclass(WatchDogHandler, ABC)
+    assert "handle" in WatchDogHandler.__abstractmethods__
+    with pytest.raises(TypeError):
+        WatchDogHandler()  # type: ignore[abstract]
+
+    class _ConcreteHandler(WatchDogHandler):
+        def handle(self, reason):
+            return f"handled {reason}"
+
+    result = _ConcreteHandler().handle("feed timeout")
+    assert result == "handled feed timeout"
+
+
+def test_fault_handler_wrapper_initialization(tmp_path):
+    """Verify FaultHandlerWrapper wires up the dump dir/file from the name,
+    seeds the dump sequence, and enables faulthandler for all threads."""
+    logger = MagicMock()
+    with patch("faulthandler.enable") as mock_enable:
+        handler = FaultHandlerWrapper("proc_1", str(tmp_path / "dumps"), logger)
+    assert handler._dump_dir == str(tmp_path / "dumps")
+    assert handler._dump_file == os.path.join(
+        str(tmp_path / "dumps"),
+        f"VLLM_STACK_DUMP_for_proc_1_{os.getpid()}.log",
+    )
+    assert handler._logger is logger
+    assert handler._dump_seq == 1
+    mock_enable.assert_called_once_with(all_threads=True)
+
+
+def test_fault_handler_wrapper_handle_success(tmp_path):
+    """Verify handle() creates the dump dir, appends a numbered traceback
+    entry, increments the sequence, and reports success via the logger."""
+    logger = MagicMock()
+    handler = FaultHandlerWrapper("proc_1", str(tmp_path / "nested"), logger)
+    handler.handle("feed timeout")
+
+    log_file = handler._dump_file
+    assert os.path.exists(log_file)
+    with open(log_file, encoding="utf-8") as f:
+        content = f.read()
+    assert "Call stack dump #1" in content
+    assert "due to feed timeout" in content
+    assert "================================================================" in content
+
+    assert handler._dump_seq == 2
+    logger.info.assert_called_once()
+    message = logger.info.call_args[0][0]
+    args = logger.info.call_args[0][1:]
+    assert message == "[Watchdog]Dumped stack to %s due to %s"
+    assert args == (log_file, "feed timeout")
+
+
+def test_fault_handler_wrapper_handle_failure(tmp_path):
+    """Verify handle() reports a dump failure through the logger and leaves
+    the dump sequence unchanged."""
+    logger = MagicMock()
+    handler = FaultHandlerWrapper("proc_1", str(tmp_path), logger)
+    handler._dump_seq = 5
+
+    with patch("builtins.open", side_effect=OSError("boom")):
+        handler.handle("feed timeout")
+
+    assert handler._dump_seq == 5  # not incremented on failure
+    logger.warning.assert_called_once()
+    message = logger.warning.call_args[0][0]
+    args = logger.warning.call_args[0][1:]
+    assert message == "[Watchdog]Failed to dump stack trace to %s: %s"
+    assert args[0] == handler._dump_file
+    assert isinstance(args[1], OSError) and str(args[1]) == "boom"
+
+
+def test_handler_registry_register_handlers_and_call():
+    """Verify register_handler() appends handlers and call_handlers()
+    forwards the reason to every registered handler."""
+    WatchDogHandlerRegistry.clear_handlers()
+    first = MagicMock()
+    second = MagicMock()
+    try:
+        register_watch_dog_handler(first)
+        register_watch_dog_handler(second)
+        assert len(WatchDogHandlerRegistry._registry) == 2
+
+        WatchDogHandlerRegistry.call_handlers("feed timeout")
+        first.handle.assert_called_once_with("feed timeout")
+        second.handle.assert_called_once_with("feed timeout")
+    finally:
+        WatchDogHandlerRegistry.clear_handlers()
+
+
+def test_handler_registry_clear_handlers():
+    """Verify clear_handlers() empties the shared registry and call_handlers()
+    on an empty registry is a no-op."""
+    WatchDogHandlerRegistry.clear_handlers()
+    handler = MagicMock()
+    register_watch_dog_handler(handler)
+    assert len(WatchDogHandlerRegistry._registry) == 1
+
+    WatchDogHandlerRegistry.clear_handlers()
+    assert WatchDogHandlerRegistry._registry == []
+    WatchDogHandlerRegistry.call_handlers("feed timeout")
+    handler.handle.assert_not_called()
+
+
+def test_handler_registry_insert_handler_prepends():
+    """Verify insert_handler() places the handler at the front of the shared
+    registry while register_handler() appends."""
+    WatchDogHandlerRegistry.clear_handlers()
+    first = MagicMock()
+    second = MagicMock()
+    third = MagicMock()
+    try:
+        register_watch_dog_handler(first)
+        WatchDogHandlerRegistry.register_handler(second)
+        WatchDogHandlerRegistry.insert_handler(third)
+
+        assert WatchDogHandlerRegistry._registry == [third, first, second]
+
+        WatchDogHandlerRegistry.call_handlers("feed timeout")
+        first.handle.assert_called_once_with("feed timeout")
+        second.handle.assert_called_once_with("feed timeout")
+        third.handle.assert_called_once_with("feed timeout")
+    finally:
+        WatchDogHandlerRegistry.clear_handlers()
+
+
+def test_register_watch_dog_handler_uses_shared_registry():
+    """Verify the module-level register_watch_dog_handler() appends to the
+    shared WatchDogHandlerRegistry consumed by call_handlers()."""
+    WatchDogHandlerRegistry.clear_handlers()
+    handler = MagicMock()
+    try:
+        register_watch_dog_handler(handler)
+        assert WatchDogHandlerRegistry._registry == [handler]
+
+        WatchDogHandlerRegistry.call_handlers("oops")
+        handler.handle.assert_called_once_with("oops")
+    finally:
+        WatchDogHandlerRegistry.clear_handlers()
