@@ -1036,12 +1036,8 @@ class WorkerProc:
         while True:
             with get_watch_dog().disable():
                 rpc_request = self.rpc_broadcast_mq.dequeue(indefinite=True)
-            try:
-                self._execute_worker_rpc(rpc_request)
-            finally:
-                # Drop the reference so the payload can be reclaimed before
-                # the next dequeue starts.
-                del rpc_request
+            self._execute_worker_rpc(rpc_request)
+            del rpc_request
 
     def _execute_worker_rpc(
         self,
