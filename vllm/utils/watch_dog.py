@@ -59,6 +59,7 @@ class ThreadedWatchDog(WatchDog):
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
+        self.handler = None
 
     def feed(self) -> None:
         self.last_feed_time = time.monotonic()
@@ -75,25 +76,34 @@ class ThreadedWatchDog(WatchDog):
     def handle_failure(self, reason: str) -> None:
         """Append a numbered dump of all thread stacks to the dump file."""
         with self.lock:
-            try:
-                os.makedirs(self.dump_dir, exist_ok=True)
-                with open(self.dump_file, "a") as f:
-                    f.write(
-                        f"\n>>> Call stack dump #{self.dump_seq} at "
-                        f"{time.ctime()} due to {reason}\n\n"
-                    )
-                    faulthandler.dump_traceback(file=f, all_threads=True)
-                    f.write("\n" + "=" * 64 + "\n")
-                self.dump_seq += 1
-                self.logger.info(
-                    "[Watchdog]Dumped stack to %s due to %s", self.dump_file, reason
+            if self.handler is None:
+                self.dump_stack(reason)
+            else:
+                self.handler(reason)
+
+    def dump_stack(self, reason: str) -> None:
+        try:
+            os.makedirs(self.dump_dir, exist_ok=True)
+            with open(self.dump_file, "a") as f:
+                f.write(
+                    f"\n>>> Call stack dump #{self.dump_seq} at "
+                    f"{time.ctime()} due to {reason}\n\n"
                 )
-            except Exception as e:
-                self.logger.warning(
-                    "[Watchdog]Failed to dump stack trace to %s: %s",
-                    self.dump_file,
-                    e,
-                )
+                faulthandler.dump_traceback(file=f, all_threads=True)
+                f.write("\n" + "=" * 64 + "\n")
+            self.dump_seq += 1
+            self.logger.info(
+                "[Watchdog]Dumped stack to %s due to %s", self.dump_file, reason
+            )
+        except Exception as e:
+            self.logger.warning(
+                "[Watchdog]Failed to dump stack trace to %s: %s",
+                self.dump_file,
+                e,
+            )
+
+    def set_handler(self, handler) -> None:
+        self.handler = handler
 
     def _check_loop(self) -> None:
         while not self.stop_event.wait(self.check_interval):
